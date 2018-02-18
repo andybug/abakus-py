@@ -57,6 +57,11 @@ class ExcludeRulesStack:
 
         self.rules.append(excludeRules)
 
+    def pushRule(self, path, rule):
+        excludeRules = ExcludeRules(path)
+        excludeRules.addRule(rule)
+        self.rules.append(excludeRules)
+
     def popRules(self, path):
         rules = self.rules.pop()
         if rules.directory != path:
@@ -93,7 +98,9 @@ class AbakusObjectList:
         logging.info('Creating hash tree at %s' % root)
         self.objList = []
         self.root = root
-        self.__addTree(root, ExcludeRulesStack())
+        rulesStack = ExcludeRulesStack()
+        rulesStack.pushRule(root, '/.abakus')
+        self.__addTree(root, rulesStack)
 
     def __str__(self):
         lines = []
