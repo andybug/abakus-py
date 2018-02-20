@@ -77,15 +77,26 @@ class ExcludeRulesStack:
 
 
 class AbakusFile:
-    def __init__(self, absPath, relPath):
-        self.path = relPath
-        self.hash = self.__hash(absPath)
-        self.mtime = os.path.getmtime(absPath)
-        self.ctime = os.path.getctime(absPath)
+    def __init__(self, *args, **kwargs):
+        if 'fromObject' in kwargs:
+            obj = kwargs['fromObject']
+            self.path = obj['path']
+            self.hash = obj['hash']
+            self.mtime = obj['mtime']
+            self.ctime = obj['ctime']
+        elif 'absPath' in kwargs:
+            self.absPath = kwargs['absPath']
+            self.relPath = os.path.relpath(self.absPath, kwargs['root'])
+            self.mtime = os.path.getmtime(self.absPath)
+            self.ctime = os.path.getctime(self.absPath)
+            self.hash = self.__hash(self.absPath)
+            self.objPath = os.path.join(kwargs['root'], '.abakus/objects', self.hash)
+            self.__writeObject()
+            self.__writeObjectMetadata()
 
     def __str__(self):
         FORMAT = '%Y-%m-%d %H:%M:%S'
-        return '%s %s  %s' % (self.hash, datetime.datetime.fromtimestamp(self.mtime).strftime(FORMAT), self.path)
+        return '%s %s  %s' % (self.hash, datetime.datetime.fromtimestamp(self.mtime).strftime(FORMAT), self.relPath)
 
     def __hash(self, path):
         BUF_SIZE = 32768
@@ -95,9 +106,33 @@ class AbakusFile:
                 hash.update(chunk)
         return hash.hexdigest()
 
+    def __writeObject(self):
+        BUF_SIZE = 32768
+        with open(self.absPath, 'rb') as rf:
+            with open(self.objPath, 'wb') as wf:
+                encoder = zlib.compressobj()
+                for chunk in iter(lambda: rf.read(BUF_SIZE), b''):
+                    wf.write(encoder.compress(chunk))
+                wf.write(encoder.flush())
+
+    def __writeObjectMetadata(self):
+        obj = {}
+        obj['type'] = 'FileMetadata'
+        obj['version'] = 1
+        obj['path'] = self.relPath
+        obj['hash'] = self.hash
+        obj['mtime'] = self.mtime
+        obj['ctime'] = self.ctime
+
+        BUF_SIZE = 32768
+        with open('%s.metadata' % self.objPath, 'wb') as f:
+            with io.StringIO() as stream:
+                yaml.dump(obj, stream, default_flow_style=False, indent=2)
+                f.write(zlib.compress(bytes(stream.getvalue(), 'utf8')))
+
     def getObject(self):
         o = {}
-        o['path'] = self.path
+        o['path'] = self.relPath
         o['hash'] = self.hash
         o['mtime'] = self.mtime
         o['ctime'] = self.ctime
@@ -138,7 +173,7 @@ class AbakusIndex:
         excludeRules.popRules(root)
 
     def addFile(self, absPath):
-        af = AbakusFile(absPath, os.path.relpath(absPath, self.root))
+        af = AbakusFile(root=self.root, absPath=absPath)
         self.objList.append(af)
 
     def write(self, path):
@@ -154,6 +189,20 @@ class AbakusIndex:
                 yaml.dump(obj, stream, default_flow_style=False, indent=2)
                 f.write(zlib.compress(bytes(stream.getvalue(), 'utf8')))
 
+    def read(self, path):
+        logging.info('Loading index from %s' % path)
+        with open(path, 'rb') as f:
+            indexFile = yaml.load(str(zlib.decompress(f.read()), 'utf8'))
+            if indexFile['type'] != 'Index':
+                logging.error('Expected type Index: %s' % path)
+            if indexFile['version'] != 1:
+                logging.error('Unknown Index version %d: %s' % (indexFile['version'], path))
+                exit(1)
+
+            for entry in indexFile['files']:
+               aFile = AbakusFile(root=self.root, fromObject=entry)
+               self.objList.append(aFile)
+
 
 def createDirs(root):
     homeDir = os.path.join(root, '.abakus')
@@ -164,11 +213,13 @@ def createDirs(root):
 def addCommand(root, paths):
     logging.info('Adding %d files to index' % len(paths))
     index = AbakusIndex(root)
+    #index.read(os.path.join(root, '.abakus', 'index'))
+
     for path in paths:
         index.addFile(os.path.abspath(path))
 
     print(index)
-    index.write(os.path.join(root, '.abakus', 'index.yaml'))
+    index.write(os.path.join(root, '.abakus/index'))
 
 
 if __name__ == '__main__':
