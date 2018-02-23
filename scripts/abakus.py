@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import sys
+import time
 import zlib
 
 import nacl.encoding
@@ -114,10 +115,12 @@ class AbakusMetadata:
             self.ctime = int(round(os.path.getctime(self.absPath)))
             self.size = os.path.getsize(self.absPath)
             self.hash = self.__hash()
+            self.metadataHash = self.__metadataHash()
+            self.compressedHash = None
 
     def __str__(self):
         FORMAT = '%Y-%m-%d %H:%M:%S'
-        return '%s %*d %s  %s' % (self.hash[:16], 12, self.size, datetime.datetime.fromtimestamp(self.mtime).strftime(FORMAT), self.relPath)
+        return '%s %*d %s  %s' % (self.getShortHash(), 12, self.size, datetime.datetime.fromtimestamp(self.mtime).strftime(FORMAT), self.relPath)
 
     def __repr__(self):
         return repr((self.relPath))
@@ -130,8 +133,18 @@ class AbakusMetadata:
                 hash.update(chunk)
         return hash.hexdigest()
 
+    def __metadataHash(self):
+        input = bytearray('%s%s%d%d%d' % (self.hash, self.relPath, self.ctime, self.mtime, self.size), 'utf8')
+        return blake2b(input).hexdigest()
 
-class AbakusFileList:
+    def getShortHash(self):
+        return self.hash[:16]
+
+    def getShortMetadataHash(self):
+        return self.metadataHash[:16]
+
+
+class AbakusMetadataList:
     class ExcludeRules:
         def __init__(self, dir):
             self.dir = dir
@@ -159,7 +172,7 @@ class AbakusFileList:
 
         def pushRules(self, path):
             ignoreFilePath = os.path.join(path, '.abakusignore')
-            excludeRules = AbakusFileList.ExcludeRules(path)
+            excludeRules = AbakusMetadataList.ExcludeRules(path)
             try:
                 with open(ignoreFilePath, 'r') as stream:
                     ignoreFile = yaml.load(stream)
@@ -177,7 +190,7 @@ class AbakusFileList:
             self.rules.append(excludeRules)
 
         def pushRule(self, path, rule):
-            excludeRules = AbakusFileList.ExcludeRules(path)
+            excludeRules = AbakusMetadataList.ExcludeRules(path)
             excludeRules.addRule(rule)
             self.rules.append(excludeRules)
 
@@ -194,22 +207,22 @@ class AbakusFileList:
 
 
     def __init__(self, **kwargs):
-        self.fileList = []
+        self.metadataList = []
 
         if 'dir' in kwargs:
             self.__addTree(kwargs['dir'])
 
     def __str__(self):
         lines = []
-        for metadata in self.fileList:
+        for metadata in self.metadataList:
             lines.append(str(metadata))
         return '\n'.join(lines)
 
     def __addTree(self, root):
-        rulesStack = AbakusFileList.ExcludeRulesStack()
+        rulesStack = AbakusMetadataList.ExcludeRulesStack()
         rulesStack.pushRule(root, '/.abakus')
         self.__addSubTree(root, root, rulesStack)
-        self.fileList = sorted(self.fileList, key=lambda metadata: metadata.relPath)
+        self.metadataList = sorted(self.metadataList, key=lambda metadata: metadata.relPath)
 
     def __addSubTree(self, root, current, excludeRules):
         excludeRules.pushRules(current)
@@ -223,24 +236,69 @@ class AbakusFileList:
                 self.__addSubTree(root, f, excludeRules)
             elif os.path.isfile(f):
                 metadata = AbakusMetadata(root, absPath=f)
-                self.fileList.append(metadata)
+                self.metadataList.append(metadata)
 
         excludeRules.popRules(current)
 
+    def list(self):
+        return self.metadataList
+
 
 class AbakusBlobStore:
-    def __init__(self, blobDir):
+    def __init__(self, abakus, blobDir):
+        self.abakus = abakus
         self.blobDir = blobDir
+
+    def add(self, metadata):
+        logging.debug('Creating blob for %s (%s)' % (metadata.getShortHash(), metadata.relPath))
+        return True
 
 
 class AbakusMetadataStore:
-    def __init__(self, metadataDir):
+    def __init__(self, abakus, metadataDir):
+        self.abakus = abakus
         self.metadataDir = metadataDir
+
+    def add(self, metadata):
+        if os.path.isfile(os.path.join(self.metadataDir, metadata.metadataHash)):
+            logging.debug('%s (%s) already exists in MetadataStore, skipping...' % (metadata.getShortMetadataHash(), metadata.relPath))
+            return True
+        if not self.abakus.blobStore.add(metadata):
+            return False
+
+        return self.__write(metadata)
+
+    def __write(self, metadata):
+        logging.debug('Writing metadata for %s (%s)' % (metadata.getShortMetadataHash, metadata.relPath))
+        obj = {}
+        obj['type'] = 'Metadata'
+        obj['version'] = 1
+        obj['relPath'] = metadata.relPath
+        obj['hash'] = metadata.hash
+        obj['mtime'] = metadata.mtime
+        obj['ctime'] = metadata.ctime
+        obj['size'] = metadata.size
+
+        BUF_SIZE = 32768
+        with open(os.path.join(self.metadataDir, metadata.metadataHash), 'wb') as f:
+            with io.StringIO() as stream:
+                yaml.dump(obj, stream, default_flow_style=False, indent=2)
+                f.write(zlib.compress(bytes(stream.getvalue(), 'utf8')))
+
+        return True
 
 
 class AbakusSnapshotStore:
-    def __init__(self, snapshotDir):
+    def __init__(self, abakus, snapshotDir):
+        self.abakus = abakus
         self.snapshotDir = snapshotDir
+
+    def snapshot(self, metadataList):
+        logging.info('Creating snapshot')
+        snapshotTime = time.gmtime()
+
+        for metadata in metadataList.list():
+            self.abakus.metadataStore.add(metadata)
 
 
 class Abakus:
@@ -250,10 +308,28 @@ class Abakus:
         self.blobDir = os.path.join(self.homeDir, 'blob')
         self.metadataDir = os.path.join(self.homeDir, 'metadata')
         self.snapshotDir = os.path.join(self.homeDir, 'snapshot')
+        self.configPath = os.path.join(self.homeDir, 'config')
 
-        self.blobStore = AbakusBlobStore(self.blobDir)
-        self.metadataStore = AbakusMetadataStore(self.metadataDir)
-        self.snapshotStore = AbakusSnapshotStore(self.snapshotDir)
+        self.loadConfig()
+
+        self.blobStore = AbakusBlobStore(self, self.blobDir)
+        self.metadataStore = AbakusMetadataStore(self, self.metadataDir)
+        self.snapshotStore = AbakusSnapshotStore(self, self.snapshotDir)
+
+    def loadConfig(self):
+        try:
+            with open(self.configPath, 'r') as f:
+                config = yaml.load(f)
+                if config['type'] != 'Config':
+                    logging.error('Expected type Config: %s' % self.configPath)
+                    exit(1)
+                elif config['verison'] != 1:
+                    logging.error('Unknown Config version %d: %s' % (config['version'], self.configPath))
+                    exit(1)
+
+                self.uuid = config['uuid']
+        except:
+            self.uuid = 'uninitialized'
 
     #def __find_root(self, dir):
     #    if dir == '/':
@@ -272,20 +348,22 @@ class Abakus:
         os.mkdir(self.metadataDir)
         os.mkdir(self.snapshotDir)
 
+        with open(os.path.join(self.home, 'config'), 'r') as f:
+            config = yaml.load(f)
+
     def cmd_status(self):
         pass
 
     def cmd_snapshot(self):
-        workdir = AbakusFileList(dir=self.root)
-        print(workdir)
-
+        workdir = AbakusMetadataList(dir=self.root)
+        self.snapshotStore.snapshot(workdir)
 
 if __name__ == '__main__':
     logging.basicConfig(stream=sys.stdout, format='%(asctime)s %(levelname)s %(message)s', level=logging.DEBUG)
 
     abakus = Abakus(root=os.getcwd())
 
-    ## argument parsing
+    # argument parsing
     parser = argparse.ArgumentParser(prog='abakus')
     subparsers = parser.add_subparsers(help='subcommand help')
 
