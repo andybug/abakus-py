@@ -16,97 +16,8 @@ from pyblake2 import blake2b
 import yaml
 
 
-#class AbakusFile:
-#    def __init__(self, *args, **kwargs):
-#        if 'fromObject' in kwargs:
-#            obj = kwargs['fromObject']
-#            self.path = obj['path']
-#            self.hash = obj['hash']
-#            self.mtime = obj['mtime']
-#            self.ctime = obj['ctime']
-#        elif 'absPath' in kwargs:
-#            self.absPath = kwargs['absPath']
-#            self.relPath = os.path.relpath(self.absPath, kwargs['root'])
-#            self.mtime = os.path.getmtime(self.absPath)
-#            self.ctime = os.path.getctime(self.absPath)
-#            self.hash = self.__hash(self.absPath)
-#            self.objPath = os.path.join(kwargs['root'], '.abakus/objects', self.hash)
-#            self.__writeObject()
-#            self.__writeObjectMetadata()
-#
-#    def __str__(self):
-#        FORMAT = '%Y-%m-%d %H:%M:%S'
-#        return '%s %s  %s' % (self.hash, datetime.datetime.fromtimestamp(self.mtime).strftime(FORMAT), self.relPath)
-#
-#    def __hash(self, path):
-#        BUF_SIZE = 32768
-#        hash = blake2b(digest_size=32)
-#        with open(path, 'rb') as f:
-#            for chunk in iter(lambda: f.read(BUF_SIZE), b''):
-#                hash.update(chunk)
-#        return hash.hexdigest()
-#
-#    def __writeObject(self):
-#        BUF_SIZE = 32768
-#        with open(self.absPath, 'rb') as rf:
-#            with open(self.objPath, 'wb') as wf:
-#                encoder = zlib.compressobj()
-#                for chunk in iter(lambda: rf.read(BUF_SIZE), b''):
-#                    wf.write(encoder.compress(chunk))
-#                wf.write(encoder.flush())
-#
-#    def __writeObjectMetadata(self):
-#        obj = {}
-#        obj['type'] = 'FileMetadata'
-#        obj['version'] = 1
-#        obj['path'] = self.relPath
-#        obj['hash'] = self.hash
-#        obj['mtime'] = self.mtime
-#        obj['ctime'] = self.ctime
-#
-#        BUF_SIZE = 32768
-#        with open('%s.metadata' % self.objPath, 'wb') as f:
-#            with io.StringIO() as stream:
-#                yaml.dump(obj, stream, default_flow_style=False, indent=2)
-#                f.write(zlib.compress(bytes(stream.getvalue(), 'utf8')))
-#
-#    def getObject(self):
-#        o = {}
-#        o['path'] = self.relPath
-#        o['hash'] = self.hash
-#        o['mtime'] = self.mtime
-#        o['ctime'] = self.ctime
-#        return o
-#
-#    def write(self, path):
-#        obj = {}
-#        obj['type'] = 'Index'
-#        obj['version'] = 1
-#        obj['files'] = []
-#        for o in self.objList:
-#            obj['files'].append(o.getObject())
-#
-#        with open(path, 'wb') as f:
-#            with io.StringIO() as stream:
-#                yaml.dump(obj, stream, default_flow_style=False, indent=2)
-#                f.write(zlib.compress(bytes(stream.getvalue(), 'utf8')))
-#
-#    def read(self, path):
-#        logging.info('Loading index from %s' % path)
-#        with open(path, 'rb') as f:
-#            indexFile = yaml.load(str(zlib.decompress(f.read()), 'utf8'))
-#            if indexFile['type'] != 'Index':
-#                logging.error('Expected type Index: %s' % path)
-#            if indexFile['version'] != 1:
-#                logging.error('Unknown Index version %d: %s' % (indexFile['version'], path))
-#                exit(1)
-#
-#            for entry in indexFile['files']:
-#               aFile = AbakusFile(root=self.root, fromObject=entry)
-#               self.objList.append(aFile)
 
-
-class AbakusMetadata:
+class AbakusFileMetadata:
     def __init__(self, root, **kwargs):
         if 'absPath' in kwargs:
             self.absPath = kwargs['absPath']
@@ -116,7 +27,19 @@ class AbakusMetadata:
             self.size = os.path.getsize(self.absPath)
             self.hash = self.__hash()
             self.metadataHash = self.__metadataHash()
-            self.compressedHash = None
+        elif 'obj' in kwargs:
+            obj = kwargs['obj']
+            self.absPath = os.path.join(root, obj['relPath'])
+            self.relPath = obj['relPath']
+            self.mtime = obj['mtime']
+            self.ctime = obj['ctime']
+            self.size = obj['size']
+            self.hash = obj['hash']
+            self.metadataHash = self.__metadataHash()
+            if 'cHash' in obj:
+                self.cHash = obj['cHash']
+            if 'cSize' in obj:
+                self.cSize = obj['cSize']
 
     def __str__(self):
         FORMAT = '%Y-%m-%d %H:%M:%S'
@@ -135,7 +58,12 @@ class AbakusMetadata:
 
     def __metadataHash(self):
         input = bytearray('%s%s%d%d%d' % (self.hash, self.relPath, self.ctime, self.mtime, self.size), 'utf8')
-        return blake2b(input).hexdigest()
+        return blake2b(input, digest_size=32).hexdigest()
+
+    def isCached(self):
+        if hasattr(self, 'cHash') and hasattr(self, 'cSize'):
+            return True
+        return False
 
     def getShortHash(self):
         return self.hash[:16]
@@ -143,8 +71,25 @@ class AbakusMetadata:
     def getShortMetadataHash(self):
         return self.metadataHash[:16]
 
+    def getFileObject(self):
+        if not self.isCached():
+            logging.error('Cannot create file object - not cached (%s)' % self.relPath)
+            return None
 
-class AbakusMetadataList:
+        obj = {}
+        obj['type'] = 'FileMetadata'
+        obj['version'] = 1
+        obj['relPath'] = self.relPath
+        obj['hash'] = self.hash
+        obj['mtime'] = self.mtime
+        obj['ctime'] = self.ctime
+        obj['size'] = self.size
+        obj['cHash'] = self.cHash
+        obj['cSize'] = self.cSize
+        return obj
+
+
+class AbakusFileMetadataList:
     class ExcludeRules:
         def __init__(self, dir):
             self.dir = dir
@@ -172,7 +117,7 @@ class AbakusMetadataList:
 
         def pushRules(self, path):
             ignoreFilePath = os.path.join(path, '.abakusignore')
-            excludeRules = AbakusMetadataList.ExcludeRules(path)
+            excludeRules = AbakusFileMetadataList.ExcludeRules(path)
             try:
                 with open(ignoreFilePath, 'r') as stream:
                     ignoreFile = yaml.load(stream)
@@ -190,7 +135,7 @@ class AbakusMetadataList:
             self.rules.append(excludeRules)
 
         def pushRule(self, path, rule):
-            excludeRules = AbakusMetadataList.ExcludeRules(path)
+            excludeRules = AbakusFileMetadataList.ExcludeRules(path)
             excludeRules.addRule(rule)
             self.rules.append(excludeRules)
 
@@ -219,7 +164,7 @@ class AbakusMetadataList:
         return '\n'.join(lines)
 
     def __addTree(self, root):
-        rulesStack = AbakusMetadataList.ExcludeRulesStack()
+        rulesStack = AbakusFileMetadataList.ExcludeRulesStack()
         rulesStack.pushRule(root, '/.abakus')
         self.__addSubTree(root, root, rulesStack)
         self.metadataList = sorted(self.metadataList, key=lambda metadata: metadata.relPath)
@@ -235,7 +180,7 @@ class AbakusMetadataList:
             if os.path.isdir(f):
                 self.__addSubTree(root, f, excludeRules)
             elif os.path.isfile(f):
-                metadata = AbakusMetadata(root, absPath=f)
+                metadata = AbakusFileMetadata(root, absPath=f)
                 self.metadataList.append(metadata)
 
         excludeRules.popRules(current)
@@ -251,7 +196,27 @@ class AbakusBlobStore:
 
     def add(self, metadata):
         logging.debug('Creating blob for %s (%s)' % (metadata.getShortHash(), metadata.relPath))
-        return True
+        blobPath = os.path.join(self.blobDir, metadata.hash)
+        hash = blake2b(digest_size=32)
+        BUF_SIZE = 32768
+
+        if os.path.isfile(blobPath):
+            logging.debug('%s (%s) already exists in BlobStore, just hashing...' % (metadata.getShortHash(), metadata.relPath))
+            with open(blobPath, 'rb') as f:
+                for chunk in iter(lambda: f.read(BUF_SIZE), b''):
+                    hash.update(chunk)
+        else:
+            with open(metadata.absPath, 'rb') as rf:
+                with open(blobPath, 'wb') as wf:
+                    encoder = zlib.compressobj()
+                    for chunk in iter(lambda: rf.read(BUF_SIZE), b''):
+                        cChunk = encoder.compress(chunk)
+                        wf.write(cChunk)
+                        hash.update(cChunk)
+                    wf.write(encoder.flush())
+
+        metadata.cHash = hash.hexdigest()
+        metadata.cSize = os.stat(blobPath).st_size
 
 
 class AbakusMetadataStore:
@@ -261,25 +226,27 @@ class AbakusMetadataStore:
 
     def add(self, metadata):
         if os.path.isfile(os.path.join(self.metadataDir, metadata.metadataHash)):
-            logging.debug('%s (%s) already exists in MetadataStore, skipping...' % (metadata.getShortMetadataHash(), metadata.relPath))
-            return True
-        if not self.abakus.blobStore.add(metadata):
-            return False
+            logging.debug('%s (%s) already exists in MetadataStore, loading...' % (metadata.getShortMetadataHash(), metadata.relPath))
+            return self.__read(metadata)
 
-        return self.__write(metadata)
+        self.abakus.blobStore.add(metadata)
+        self.__write(metadata)
+
+    def __read(self, metadata):
+        metadataPath = os.path.join(self.metadataDir, metadata.metadataHash)
+        with open(metadataPath, 'rb') as f:
+            metadataFile = yaml.load(str(zlib.decompress(f.read()), 'utf8'))
+            if metadataFile['type'] != 'FileMetadata':
+                logging.error('Expected type FileMetadata: %s' % metadataPath)
+                exit(1)
+            if metadataFile['version'] != 1:
+                logging.error('Unknown FileMetadata version %d: %s' % (metadataFile['version'], metadataPath))
+                exit(1)
+            return AbakusFileMetadata(self.abakus.root, obj=metadataFile)
 
     def __write(self, metadata):
-        logging.debug('Writing metadata for %s (%s)' % (metadata.getShortMetadataHash, metadata.relPath))
-        obj = {}
-        obj['type'] = 'Metadata'
-        obj['version'] = 1
-        obj['relPath'] = metadata.relPath
-        obj['hash'] = metadata.hash
-        obj['mtime'] = metadata.mtime
-        obj['ctime'] = metadata.ctime
-        obj['size'] = metadata.size
-
-        BUF_SIZE = 32768
+        logging.debug('Writing metadata for %s (%s)' % (metadata.getShortMetadataHash(), metadata.relPath))
+        obj = metadata.getFileObject()
         with open(os.path.join(self.metadataDir, metadata.metadataHash), 'wb') as f:
             with io.StringIO() as stream:
                 yaml.dump(obj, stream, default_flow_style=False, indent=2)
@@ -299,6 +266,7 @@ class AbakusSnapshotStore:
 
         for metadata in metadataList.list():
             self.abakus.metadataStore.add(metadata)
+            #print('%s %r' % (metadata, metadata.isCached()))
 
 
 class Abakus:
@@ -355,7 +323,7 @@ class Abakus:
         pass
 
     def cmd_snapshot(self):
-        workdir = AbakusMetadataList(dir=self.root)
+        workdir = AbakusFileMetadataList(dir=self.root)
         self.snapshotStore.snapshot(workdir)
 
 if __name__ == '__main__':
