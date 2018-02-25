@@ -261,12 +261,29 @@ class AbakusSnapshotStore:
         self.snapshotDir = snapshotDir
 
     def snapshot(self, metadataList):
-        logging.info('Creating snapshot')
-        snapshotTime = time.gmtime()
+        logging.info('Creating snapshot of %d files' % len(metadataList.list()))
+
+        obj = {}
+        obj['type'] = 'Snapshot'
+        obj['version'] = 1
+        obj['timestamp'] = int(time.time())
+        obj['metadatalist'] = []
+
+        hash = blake2b(digest_size=32)
+        hash.update(bytes(str(obj['timestamp']), 'utf8'))
 
         for metadata in metadataList.list():
             self.abakus.metadataStore.add(metadata)
-            #print('%s %r' % (metadata, metadata.isCached()))
+            hash.update(bytearray(metadata.metadataHash, 'utf8'))
+            obj['metadatalist'].append(metadata.metadataHash)
+
+        self.__write(obj, hash.hexdigest())
+
+    def __write(self, obj, snapshotID):
+        with open(os.path.join(self.snapshotDir, snapshotID), 'wb') as f:
+            with io.StringIO() as stream:
+                yaml.dump(obj, stream, default_flow_style=False, indent=2)
+                f.write(zlib.compress(bytes(stream.getvalue(), 'utf8')))
 
 
 class Abakus:
