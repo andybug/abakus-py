@@ -7,11 +7,9 @@ import sys
 
 import yaml
 
-from blob_store import AbakusBlobStore
-from diff import AbakusDiff
-from metadata import AbakusMetadata, AbakusMetadataList
-from metadata_store import AbakusMetadataStore
-from snapshot_store import AbakusSnapshotStore
+from blob import AbakusBlobStore
+from metadata import AbakusMetadata, AbakusMetadataList, AbakusMetadataStore, AbakusDiff
+from snapshot import AbakusSnapshotStore
 
 
 class Abakus:
